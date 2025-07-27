@@ -54,25 +54,57 @@ struct StreamData {
 };
 
 // --- CPU task to analyze results after GPU is done ---
-// Add transformSize as a new argument
+// --- New Helper function to convert frequency to a musical note ---
+std::string frequencyToNote(float freq) {
+    if (freq <= 0) return "N/A";
+    const char* noteNames[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    
+    // Calculate the MIDI note number
+    int midiNote = round(12 * log2(freq / 440.0f) + 69);
+    
+    // Determine the note name and octave
+    std::string noteName = noteNames[midiNote % 12];
+    int octave = (midiNote / 12) - 1;
+    
+    return noteName + std::to_string(octave);
+}
+// --- CPU task to analyze results after GPU is done ---
 void postProcess(StreamData& data, std::ofstream& resultsFile, int transformSize) {
+    const int TOP_N = 3; // Find the top 3 frequencies
     const int fft_output_size = (data.numSamples / 2) + 1;
-    float maxMagnitude = 0.0f;
-    int peakIndex = 0;
+    
+    // Store all frequency magnitudes and indices
+    std::vector<std::pair<float, int>> magnitudes;
+    magnitudes.reserve(fft_output_size);
 
-    for (int i = 1; i < fft_output_size; ++i) { 
+    for (int i = 1; i < fft_output_size; ++i) { // Start at 1 to ignore DC offset
         float mag = sqrtf(data.h_out_pinned[i].x * data.h_out_pinned[i].x + data.h_out_pinned[i].y * data.h_out_pinned[i].y);
-        if (mag > maxMagnitude) {
-            maxMagnitude = mag;
-            peakIndex = i;
+        magnitudes.push_back({mag, i});
+    }
+
+    // Sort to find the frequencies with the highest magnitude
+    std::sort(magnitudes.begin(), magnitudes.end(), [](const auto& a, const auto& b) {
+        return a.first > b.first;
+    });
+
+    std::cout << "  > Finished " << data.filePath.filename().string() << ":\n";
+    resultsFile << data.filePath.filename().string();
+
+    // Get the top N results
+    for (int i = 0; i < TOP_N; ++i) {
+        if (i < magnitudes.size()) {
+            int peakIndex = magnitudes[i].second;
+            float peakFrequency = static_cast<float>(peakIndex) * data.sampleRate / transformSize;
+            std::string note = frequencyToNote(peakFrequency);
+
+            std::cout << "    - Freq " << i + 1 << ": " << peakFrequency << " Hz (" << note << ")\n";
+            resultsFile << "," << peakFrequency << "," << note;
+        } else {
+            resultsFile << ",,"; // Add empty columns if fewer than N peaks are found
         }
     }
-    // Corrected Formula: Use the plan's transformSize, not the file's numSamples
-    float peakFrequency = static_cast<float>(peakIndex) * data.sampleRate / transformSize;
-
-    resultsFile << data.filePath.filename().string() << "," << peakFrequency << "\n";
-    std::cout << "  > Finished " << data.filePath.filename().string() << ": " << peakFrequency << " Hz\n";
-    data.inUse = false;
+    resultsFile << "\n";
+    data.inUse = false; // Mark stream as free
 }
 // --- Main Application ---
 int main(int argc, char** argv) {
@@ -122,7 +154,7 @@ int main(int argc, char** argv) {
     }
 
     std::ofstream resultsFile(outDir / "frequency_results.csv");
-    resultsFile << "filename,peak_frequency_hz\n";
+    resultsFile << "filename,freq1_hz,note1,freq2_hz,note2,freq3_hz,note3\n";
 
     int fileIndex = 0;
     int processedCount = 0;
